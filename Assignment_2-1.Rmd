@@ -1,0 +1,368 @@
+---
+title: "Assignment 2"
+author: "Derek G. Nokes"
+date: "Saturday, January 31, 2015"
+output: pdf_document
+toc: True
+---
+
+\pagebreak
+
+# Connect to the PostgreSQL Database
+
+To anwser assignment questions we connect to the PostgreSQL database as follows:
+
+```{r}
+#
+library('RPostgreSQL')
+# connect to PoststgreSQL using RPostgreSQL
+driverHandle <- dbDriver("PostgreSQL")
+ 
+# establish connection to 'flights' database
+connectionHandle <- dbConnect(driverHandle, 
+                              dbname="flights",
+                              host="localhost",
+                              port=5432,user="postgres",
+                              password  ="tgdnrx78")
+```
+
+# Q1
+Which destination in the flights database is the furthest distance away?
+
+## Anwser
+
+We join the 'flights' and 'airports' tables:
+
+```{r}
+# construct the query
+# join flights and airports tables to match origin and destination
+# FAA codes with airport names, latitude, and longitude
+query<-'SELECT DISTINCT flights.origin as origin_faa,airports.name as 
+origin_name,airports.lat as origin_lat,airports.lon as origin_lon,
+flights.dest as dest_faa,a.name as dest_name,a.lat as dest_lat,a.lon 
+as dest_lon,flights.distance FROM flights INNER JOIN airports ON 
+flights.origin = airports.faa JOIN airports a ON flights.dest = a.faa 
+GROUP BY origin_faa,dest_faa,flights.distance,origin_name,origin_lat,
+origin_lon,dest_name,dest_lat,dest_lon ORDER BY flights.distance DESC 
+LIMIT 1'
+
+# fetch data
+data<-dbGetQuery(connectionHandle,query)
+knitr::kable(t(data), caption = 'Destination Furthest Distance Away')
+```
+
+`r data$dest_name` (`r data$dest_faa`) is the destination that is the 
+furthest distance away from `r data$origin_name` (`r data$origin_faa`) 
+at `r data$distance` miles.
+
+
+# Q2 
+What are the different numbers of engines in the planes table? For each 
+number of engines, which aircraft have the most number of seats?
+
+## Anwser
+
+We can fetch the maxiumum number of seats for each distinct number of 
+engines:
+
+```{r}
+# fetch the distinct number of engines and join on
+query<-'SELECT DISTINCT planes.engines,MAX(planes.seats) as max_seats 
+FROM planes GROUP BY engines ORDER BY engines DESC'
+numberOfEngines<-dbGetQuery(connectionHandle,query)
+
+knitr::kable(numberOfEngines, caption = 'Maximum Number of Seats by 
+             Number of Engines')
+```
+
+We can then loop over each combination of number of engines and maximum number 
+of seats and fetch the details of the corresponding planes:
+
+```{r}
+# 
+
+for(i in seq_along(numberOfEngines[,1])) {
+    numberOfEnginesAndSeats<-numberOfEngines[i,]
+    engines<-numberOfEnginesAndSeats$engines
+    seats<-numberOfEnginesAndSeats$max_seats
+      
+    # build the query
+    query<-paste0('SELECT DISTINCT model,manufacturer,type,engines,seats 
+                  FROM planes WHERE engines=',engines,' AND seats=',seats,
+                  ' ORDER BY seats')
+    # execute the query
+    data<-dbGetQuery(connectionHandle,query)
+
+    # create the results table
+    print(data)
+    knitr::kable(data)
+}
+
+```
+
+We can also use a slightly more complex single query to return the plane 
+details associated with the maximum number of seats for each number of 
+engines group:
+
+```{r}
+# build the query
+query<-'SELECT DISTINCT t.manufacturer,t.model,t.type,t.engine,t.engines,
+t.seats FROM planes t INNER JOIN (SELECT DISTINCT engines as numberOfEngines,
+max(seats) as max_seats FROM planes GROUP BY engines) group_t ON t.seats = 
+group_t.max_seats AND t.engines = group_t.numberOfEngines ORDER BY t.engines 
+DESC,t.seats DESC'
+
+# execute the query
+data<-dbGetQuery(connectionHandle,query)
+
+# create the results table
+knitr::kable(data, caption = 'Model with Maximum Number of Seats by Number 
+             of Engines')
+```
+
+# Q3 
+What weather conditions are associated with New York City departure delays?
+
+## Anwser
+
+We join the 'flights' and 'weather' tables so that we can examine the 
+relationship between different weather variables and the departure 
+delays:
+
+```{r}
+# build the query (join the weather and flights tables on date and hour)
+query<-"SELECT w.w_date_hour,f.dep_delay,f.carrier,f.tailnum,f.flight,
+f.dest,f.air_time,f.distance,f.origin,w.origin,w.temp,w.dewp,w.humid,
+w.wind_dir,w.wind_speed,w.wind_gust,w.precip,w.pressure,w.visib FROM 
+flights f INNER JOIN (SELECT concat_ws('-',weather.year,weather.month,
+weather.day,weather.hour) as w_date_hour,weather.* FROM weather) w 
+ON concat_ws('-',f.year,f.month,f.day,f.hour) = w.w_date_hour AND 
+f.origin = w.origin ORDER BY f.dep_delay DESC"
+
+# execute the query
+data<-dbGetQuery(connectionHandle,query)
+```
+
+We extract each of the weather variables and create data frames for 
+plotting:
+
+```{r}
+delayInHours<-data$dep_delay/60
+delayIndex<-floor(delayInHours)>0 & floor(delayInHours)<5
+tempDF<-data.frame(delayInHours[delayIndex],data$temp[delayIndex])
+windSpeedIndex<-data$wind_speed<200 & floor(delayInHours)>0 & floor(delayInHours)<5
+windSpeedDF<-data.frame(delayInHours[windSpeedIndex],data$wind_speed[windSpeedIndex])
+windGustIndex<-data$wind_speed<200 & floor(delayInHours)>0 & floor(delayInHours)<5
+windGustDF<-data.frame(delayInHours[windGustIndex],data$wind_gust[windGustIndex])
+precipDF<-data.frame(delayInHours[delayIndex],data$precip[delayIndex])
+pressureDF<-data.frame(delayInHours[delayIndex],data$pressure[delayIndex])
+visibDF<-data.frame(delayInHours[delayIndex],data$visib[delayIndex])
+```
+
+We create 2D histograms to examine the relationship between departure 
+delays and temperature, wind speed, wind gust, precipitation, pressure,
+and visibility:
+
+```{r,fig.width=6,fig.height=4.5,echo=FALSE}
+library(hexbin)
+# create the plot handle
+h1 <- hexbin(tempDF,xlab='delay (in hours)',ylab='Temperature')
+h2 <- hexbin(visibDF,xlab='delay (in hours)',ylab='Visibility')
+h3 <- hexbin(windSpeedDF,xlab='delay (in hours)',ylab='Wind Speed')
+h4 <- hexbin(windGustDF,xlab='delay (in hours)',ylab='Wind Gust')
+h5 <- hexbin(precipDF,xlab='delay (in hours)',ylab='Precipitation')
+h6 <- hexbin(pressureDF,xlab='delay (in hours)',ylab='Pressure')
+```
+
+There is no clear relationship between temperature and departure
+delays, but high and low temperature appear as though they have 
+more delays
+
+```{r}
+plot(h1,main='Temperature')
+```
+
+There is no clear relationship between visibility and departure
+delays
+
+```{r}
+plot(h2,main='Visibility')
+```
+
+There is no clear relationship between wind speed and departure
+delays
+
+```{r}
+plot(h3,main='Wind Speed')
+```
+
+There is no clear relationship between wind gust and departure
+delays
+
+```{r}
+plot(h4,main='Wind Gust')
+```
+
+There is no clear relationship between precipitation and departure
+delays
+
+```{r}
+plot(h5,main='Precipitation')
+```
+
+There is no clear relationship between pressure and departure
+delays
+
+```{r}
+plot(h6,main='Pressure')
+```
+
+There are no clear relationships between departure delays and
+any of the weather variables. This may be an artifact of the
+way the table join was done. Rather than join on the departure
+time, it might make more sense to join on the intended departure
+time (i.e., the departure time adjusted for the delay)
+
+# Q4 
+Are older planes more likely to be delayed?
+
+## Anwser
+
+First we join the 'fights' and 'plane' tables and look at the delays
+binned by hour. A delay in hours of zero indicates a delay of between 
+1 minute and 59 minutes, a delay of one indicates a delay of between
+1 hour and 1 hour and 59 minutes, and so forth:
+
+```{r}
+query<-"SELECT p.year,(f.dep_delay/60) as delay_in_hours FROM flights f 
+JOIN (SELECT * FROM planes) p ON f.tailnum = p.tailnum WHERE f.dep_delay>0 
+AND p.year >0 ORDER BY p.year"
+
+# execute the query
+data<-dbGetQuery(connectionHandle,query)
+
+```
+
+We create a 2D histogram to examine the relationship between departure 
+delays and the age of the plane:
+
+```{r}
+h1<- hexbin(data,xlab='year',ylab='delay (in hours)')
+plot(h1,main='Delay (In Hours) By Year of Aircraft')
+```
+
+There is no clear relationship between the age of the plane and the
+aircraft model year.
+
+```{r}
+query<-"SELECT p.year,(f.dep_delay/60) as delay_in_hours FROM flights f 
+JOIN (SELECT * FROM planes) p
+ON f.tailnum = p.tailnum 
+WHERE p.year >0
+ORDER BY p.year"
+
+# execute the query
+flights<-dbGetQuery(connectionHandle,query)
+
+```
+
+We can see that there are considerably more flights for aircraft models 
+of particular years:
+
+```{r,fig.width=6,fig.height=6}
+library('ggplot2')
+qplot(factor(year), data=flights, geom="bar",
+      xlab='total number of flights',ylab='year',
+      main='Total Number of Flights By Aircraft Model 
+      Year') + coord_flip()
+```
+
+There are far fewer total flights by very old planes.
+
+When we group by aircraft model year and look at the delayed 
+flights as a percentage of total flights, there is again no 
+clear relationship
+
+```{r}
+query<-"SELECT p.year,COUNT(f.dep_delay) FROM flights f 
+JOIN (SELECT * FROM planes) p ON f.tailnum = p.tailnum 
+WHERE p.year >0 GROUP BY p.year
+ORDER BY p.year"
+
+# execute the query
+flights<-dbGetQuery(connectionHandle,query)
+
+query<-"SELECT p.year,COUNT(f.dep_delay) FROM flights f 
+JOIN (SELECT * FROM planes) p ON f.tailnum = p.tailnum 
+WHERE p.year >0 AND dep_delay > 0 GROUP BY p.year
+ORDER BY p.year"
+
+# execute the query
+delays<-dbGetQuery(connectionHandle,query)
+
+qplot(delays$year,delays$count/flights$count,xlab='year',
+      ylab='% delayed',main='% of Flights Delayed By 
+      Aircraft Model Year')
+
+```
+
+Theefore, the age of the aircraft does not consistently appear 
+to cause more delays
+
+# Q5
+Ask (and if possible answer) a question that also requires joining information 
+from two or more tables in the flights database, and/or assumes that additional 
+information can be collected in advance of answering your question.
+
+## Anwser
+
+Are departure delays related to destination?
+
+```{r}
+# construct the query
+# join flights and airports tables to match origin and destination
+# FAA codes with airport names, latitude, and longitude
+query<-'SELECT DISTINCT flights.dest as dest_faa,a.name as dest_name,
+a.lat as dest_lat,a.lon as dest_lon,AVG(dep_delay) as delay,COUNT(dep_delay) 
+as number_of_flights,AVG(flights.distance) as distance FROM flights INNER JOIN airports 
+ON flights.origin = airports.faa JOIN airports a 
+ON flights.dest = a.faa GROUP BY dest_faa,dest_name,dest_lat,dest_lon
+ORDER BY number_of_flights,delay'
+
+# fetch data
+data<-dbGetQuery(connectionHandle,query)
+
+```
+
+Here is a plot of the destinations:
+
+```{r}
+library('rworldmap')
+newmap <- getMap(resolution = "high")
+plot(newmap,xlim = c(-139.3, -58.8),ylim = c(13.5, 55.7))
+points(data$dest_lon, data$dest_lat, col = "red", cex = .6)
+```
+
+Here are the results
+
+```{r}
+knitr::kable(data, caption = 'Average Departure Delay By Destination')
+```
+
+There does not appear to be a relationship between the departure
+delay and the destination distance.
+
+```{r}
+qplot(data$distance,data$delay,xlab='distance',
+      ylab='delay',main='Delay By Destination Distance')
+```
+
+# Disconnect from the PostgreSQL Database
+
+```{r}  
+# Close PostgreSQL connection 
+dbDisconnect(connectionHandle)
+
+```
+
+
